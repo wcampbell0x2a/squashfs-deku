@@ -1,26 +1,28 @@
 //! Read from on-disk image
 
 use std::ffi::OsString;
-use std::io::{Seek, SeekFrom};
+use std::io::{Cursor, Seek, SeekFrom};
 use std::os::unix::prelude::OsStringExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use deku::bitvec::{BitVec, BitView, Msb0};
 use deku::prelude::*;
 use rustc_hash::FxHashMap;
 use tracing::{error, info, instrument, trace};
 
+use crate::bufread::BufReadSeek;
 use crate::compressor::{CompressionOptions, Compressor};
-use crate::dir::Dir;
 use crate::error::BackhandError;
-use crate::filesystem::node::{InnerNode, Nodes};
-use crate::fragment::Fragment;
-use crate::inode::{Inode, InodeId, InodeInner};
+use crate::flags::Flags;
 use crate::kinds::{Kind, LE_V4_0};
-use crate::reader::{BufReadSeek, SquashFsReader, SquashfsReaderWithOffset};
-use crate::{
+use crate::v3::reader::SquashfsReaderWithOffset;
+use crate::v4::dir::Dir;
+use crate::v4::filesystem::node::{InnerNode, Nodes};
+use crate::v4::fragment::Fragment;
+use crate::v4::inode::{Inode, InodeId, InodeInner};
+use crate::v4::reader::SquashFsReader;
+use crate::v4::{
     metadata, Export, FilesystemReader, Id, Node, NodeHeader, SquashfsBlockDevice,
     SquashfsCharacterDevice, SquashfsDir, SquashfsFileReader, SquashfsSymlink,
 };
@@ -47,7 +49,6 @@ pub const MIN_BLOCK_SIZE: u32 = byte_unit::n_kb_bytes(4) as u32;
     ctx = "ctx_magic: [u8; 4], ctx_version_major: u16, ctx_version_minor: u16, ctx_type_endian: deku::ctx::Endian"
 )]
 pub struct SuperBlock {
-    /// Must be set to 0x73717368 ("hsqs" on disk).
     #[deku(assert_eq = "ctx_magic")]
     pub magic: [u8; 4],
     /// The number of inodes stored in the archive.
@@ -117,7 +118,7 @@ impl SuperBlock {
     }
 
     /// flag value
-    pub fn data_has_been_duplicated(&self) -> bool {
+    pub fn duplicate_data_removed(&self) -> bool {
         self.flags & Flags::DataHasBeenDeduplicated as u16 != 0
     }
 
@@ -168,23 +169,6 @@ impl SuperBlock {
     }
 }
 
-#[rustfmt::skip]
-#[allow(dead_code)]
-#[derive(Debug, Copy, Clone)]
-pub(crate) enum Flags {
-    InodesStoredUncompressed    = 0b0000_0000_0000_0001,
-    DataBlockStoredUncompressed = 0b0000_0000_0000_0010,
-    Unused                      = 0b0000_0000_0000_0100,
-    FragmentsStoredUncompressed = 0b0000_0000_0000_1000,
-    FragmentsAreNotUsed         = 0b0000_0000_0001_0000,
-    FragmentsAreAlwaysGenerated = 0b0000_0000_0010_0000,
-    DataHasBeenDeduplicated     = 0b0000_0000_0100_0000,
-    NFSExportTableExists        = 0b0000_0000_1000_0000,
-    XattrsAreStoredUncompressed = 0b0000_0001_0000_0000,
-    NoXattrsInArchive           = 0b0000_0010_0000_0000,
-    CompressorOptionsArePresent = 0b0000_0100_0000_0000,
-}
-
 #[derive(Default, Clone, Debug)]
 pub(crate) struct Cache {
     /// The first time a fragment bytes is read, those bytes are added to this map with the key
@@ -220,19 +204,15 @@ impl<'b> Squashfs<'b> {
     /// Read Superblock and Compression Options at current `reader` offset without parsing inodes
     /// and dirs
     ///
-    /// Used for unsquashfs --stat
+    /// Used for unsquashfs (extraction and --stat)
     pub fn superblock_and_compression_options(
         reader: &mut Box<dyn BufReadSeek + 'b>,
         kind: &Kind,
     ) -> Result<(SuperBlock, Option<CompressionOptions>), BackhandError> {
-        // Size of metadata + optional compression options metadata block
-        let mut superblock = [0u8; 96];
-        reader.read_exact(&mut superblock)?;
-
         // Parse SuperBlock
-        let bs = superblock.view_bits::<deku::bitvec::Msb0>();
-        let (_, superblock) = SuperBlock::read(
-            bs,
+        let mut container = Reader::new(reader);
+        let superblock = SuperBlock::from_reader_with_ctx(
+            &mut container,
             (
                 kind.inner.magic,
                 kind.inner.version_major,
@@ -260,16 +240,18 @@ impl<'b> Squashfs<'b> {
         {
             let bytes = metadata::read_block(reader, &superblock, kind)?;
             // data -> compression options
-            let bv = BitVec::from_slice(&bytes);
-            match CompressionOptions::read(&bv, (kind.inner.type_endian, superblock.compressor)) {
+            match CompressionOptions::from_reader_with_ctx(
+                &mut Reader::new(&mut Cursor::new(bytes)),
+                (kind.inner.type_endian, superblock.compressor),
+            ) {
                 Ok(co) => {
-                    if !co.0.is_empty() {
-                        error!("invalid compression options, bytes left over, using");
-                    }
-                    Some(co.1)
+                    //if !co.0.is_empty() {
+                    //    error!("invalid compression options, bytes left over, using");
+                    //}
+                    Some(co)
                 }
                 Err(e) => {
-                    error!("invalid compression options: {e:?}[{bytes:02x?}], not using");
+                    error!("invalid compression options: {e:?}, not using");
                     None
                 }
             }
@@ -363,7 +345,7 @@ impl<'b> Squashfs<'b> {
         }
 
         // Read all fields from filesystem to make a Squashfs
-        info!("Reading Inodes");
+        info!("Reading Inodes @ {:02x?}", superblock.inode_table);
         let inodes = reader.inodes(&superblock, &kind)?;
 
         info!("Reading Root Inode");
@@ -432,8 +414,8 @@ impl<'b> Squashfs<'b> {
             info!("flag: fragments are always generated");
         }
 
-        if superblock.data_has_been_duplicated() {
-            info!("flag: data has been duplicated");
+        if superblock.duplicate_data_removed() {
+            info!("flag: duplicate data has been removed");
         }
 
         if superblock.nfs_export_table_exists() {
@@ -481,11 +463,11 @@ impl<'b> Squashfs<'b> {
 
         let bytes = &block[block_offset..][..file_size as usize - 3];
         let mut dirs = vec![];
-        let mut all_bytes = bytes.view_bits::<Msb0>();
         // Read until we fail to turn bytes into `T`
-        while let Ok((rest, t)) = Dir::read(all_bytes, self.kind.inner.type_endian) {
+        let mut cursor = Cursor::new(bytes);
+        let mut container = Reader::new(&mut cursor);
+        while let Ok(t) = Dir::from_reader_with_ctx(&mut container, self.kind.inner.type_endian) {
             dirs.push(t);
-            all_bytes = rest;
         }
 
         trace!("finish");
@@ -517,7 +499,7 @@ impl<'b> Squashfs<'b> {
                     ext_dir.block_offset as usize,
                 )?
             }
-            _ => return Err(BackhandError::UnexpectedInode(dir_inode.inner.clone())),
+            _ => return Err(BackhandError::UnexpectedInode),
         };
         if let Some(dirs) = dirs {
             for d in &dirs {
@@ -543,11 +525,7 @@ impl<'b> Squashfs<'b> {
                             let basic = match &found_inode.inner {
                                 InodeInner::BasicFile(file) => file.clone(),
                                 InodeInner::ExtendedFile(file) => file.into(),
-                                _ => {
-                                    return Err(BackhandError::UnexpectedInode(
-                                        found_inode.inner.clone(),
-                                    ))
-                                }
+                                _ => return Err(BackhandError::UnexpectedInode),
                             };
                             InnerNode::File(SquashfsFileReader { basic })
                         }
@@ -566,9 +544,7 @@ impl<'b> Squashfs<'b> {
                             let device_number = self.block_device(found_inode)?;
                             InnerNode::BlockDevice(SquashfsBlockDevice { device_number })
                         }
-                        InodeId::ExtendedFile => {
-                            return Err(BackhandError::UnsupportedInode(found_inode.inner.clone()))
-                        }
+                        InodeId::ExtendedFile => return Err(BackhandError::UnsupportedInode),
                     };
                     let node = Node::new(
                         fullpath.clone(),
@@ -631,7 +607,6 @@ impl<'b> Squashfs<'b> {
     /// like structure in-memory
     #[instrument(skip_all)]
     pub fn into_filesystem_reader(self) -> Result<FilesystemReader<'b>, BackhandError> {
-        info!("creating fs tree");
         let mut root = Nodes::new_root(NodeHeader::from_inode(self.root_inode.header, &self.id));
         self.extract_dir(
             &mut PathBuf::from("/"),

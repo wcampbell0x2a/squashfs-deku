@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::normalize_squashfs_path;
-use crate::data::Added;
-use crate::inode::{BasicFile, InodeHeader};
-use crate::{BackhandError, FilesystemReaderFile, Id};
+use crate::error::BackhandError;
+use crate::v4::data::Added;
+use crate::v4::inode::{BasicFile, InodeHeader};
+use crate::v4::{FilesystemReaderFile, Id};
 
 /// File information for Node
 #[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]

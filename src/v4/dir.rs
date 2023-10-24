@@ -10,7 +10,7 @@ use std::path::{Component, Path};
 
 use deku::prelude::*;
 
-use crate::inode::InodeId;
+use crate::v4::inode::InodeId;
 use crate::BackhandError;
 
 #[derive(Debug, DekuRead, DekuWrite, Clone, PartialEq, Eq)]

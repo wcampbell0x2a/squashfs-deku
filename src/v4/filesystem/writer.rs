@@ -12,18 +12,19 @@ use tracing::{error, info, instrument, trace};
 
 use super::node::{InnerNode, Nodes};
 use super::normalize_squashfs_path;
-use crate::compressor::{CompressionOptions, Compressor};
-use crate::data::DataWriter;
-use crate::entry::Entry;
+use crate::bufread::WriteSeek;
+use crate::compressor::{CompressionOptions, Compressor, FilesystemCompressor};
 use crate::error::BackhandError;
-use crate::filesystem::node::SquashfsSymlink;
-use crate::id::Id;
+use crate::flags::Flags;
 use crate::kind::Kind;
 use crate::kinds::LE_V4_0;
-use crate::metadata::{self, MetadataWriter, METADATA_MAXSIZE};
-use crate::reader::WriteSeek;
-use crate::squashfs::{Flags, SuperBlock};
-use crate::{
+use crate::v4::data::DataWriter;
+use crate::v4::entry::Entry;
+use crate::v4::filesystem::node::SquashfsSymlink;
+use crate::v4::id::Id;
+use crate::v4::metadata::{self, MetadataWriter, METADATA_MAXSIZE};
+use crate::v4::squashfs::SuperBlock;
+use crate::v4::{
     fragment, FilesystemReader, Node, NodeHeader, SquashfsBlockDevice, SquashfsCharacterDevice,
     SquashfsDir, SquashfsFileWriter, DEFAULT_BLOCK_SIZE, DEFAULT_PAD_LEN, MAX_BLOCK_SIZE,
     MIN_BLOCK_SIZE,
@@ -885,88 +886,5 @@ impl<W: Write + Seek> Seek for WriterWithOffset<W> {
             seek => seek,
         };
         self.w.seek(seek).map(|x| x - self.offset)
-    }
-}
-
-/// All compression options for [`FilesystemWriter`]
-#[derive(Debug, Copy, Clone, Default)]
-pub struct FilesystemCompressor {
-    pub(crate) id: Compressor,
-    pub(crate) options: Option<CompressionOptions>,
-    pub(crate) extra: Option<CompressionExtra>,
-}
-
-impl FilesystemCompressor {
-    pub fn new(id: Compressor, options: Option<CompressionOptions>) -> Result<Self, BackhandError> {
-        match (id, options) {
-            // lz4 always requires options
-            (Compressor::Lz4, None) => {
-                error!("Lz4 compression options missing");
-                return Err(BackhandError::InvalidCompressionOption);
-            }
-            //others having no options is always valid
-            (_, None) => {}
-            //only the corresponding option are valid
-            (Compressor::Gzip, Some(CompressionOptions::Gzip(_)))
-            | (Compressor::Lzma, Some(CompressionOptions::Lzma))
-            | (Compressor::Lzo, Some(CompressionOptions::Lzo(_)))
-            | (Compressor::Xz, Some(CompressionOptions::Xz(_)))
-            | (Compressor::Lz4, Some(CompressionOptions::Lz4(_)))
-            | (Compressor::Zstd, Some(CompressionOptions::Zstd(_))) => {}
-            //other combinations are invalid
-            _ => {
-                error!("invalid compression settings");
-                return Err(BackhandError::InvalidCompressionOption);
-            }
-        }
-        Ok(Self {
-            id,
-            options,
-            extra: None,
-        })
-    }
-
-    /// Set options that are originally derived from the image if from a [`FilesystemReader`].
-    /// These options will be written to the image when
-    /// <https://github.com/wcampbell0x2a/backhand/issues/53> is fixed.
-    pub fn options(&mut self, options: CompressionOptions) -> Result<(), BackhandError> {
-        self.options = Some(options);
-        Ok(())
-    }
-
-    /// Extra options that are *only* using during compression and are *not* stored in the
-    /// resulting image
-    pub fn extra(&mut self, extra: CompressionExtra) -> Result<(), BackhandError> {
-        if matches!(extra, CompressionExtra::Xz(_)) && matches!(self.id, Compressor::Xz) {
-            self.extra = Some(extra);
-            return Ok(());
-        }
-
-        error!("invalid extra compression settings");
-        Err(BackhandError::InvalidCompressionOption)
-    }
-}
-
-/// Compression options only for [`FilesystemWriter`]
-#[derive(Debug, Copy, Clone)]
-pub enum CompressionExtra {
-    Xz(ExtraXz),
-}
-
-/// Xz compression option for [`FilesystemWriter`]
-#[derive(Debug, Copy, Clone, Default)]
-pub struct ExtraXz {
-    pub(crate) level: Option<u32>,
-}
-
-impl ExtraXz {
-    /// Set compress preset level. Must be in range `0..=9`
-    pub fn level(&mut self, level: u32) -> Result<(), BackhandError> {
-        if level > 9 {
-            return Err(BackhandError::InvalidCompressionOption);
-        }
-        self.level = Some(level);
-
-        Ok(())
     }
 }

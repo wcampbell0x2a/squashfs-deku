@@ -4,16 +4,16 @@ use std::os::unix::prelude::OsStrExt;
 
 use tracing::instrument;
 
-use crate::data::Added;
-use crate::dir::{Dir, DirEntry};
-use crate::inode::{
+use crate::kinds::Kind;
+use crate::v4::data::Added;
+use crate::v4::dir::{Dir, DirEntry};
+use crate::v4::inode::{
     BasicDeviceSpecialFile, BasicDirectory, BasicFile, BasicSymlink, ExtendedDirectory, Inode,
     InodeHeader, InodeId, InodeInner,
 };
-use crate::kinds::Kind;
-use crate::metadata::MetadataWriter;
-use crate::squashfs::SuperBlock;
-use crate::{Id, NodeHeader, SquashfsBlockDevice, SquashfsCharacterDevice, SquashfsSymlink};
+use crate::v4::metadata::MetadataWriter;
+use crate::v4::squashfs::SuperBlock;
+use crate::v4::{Id, NodeHeader, SquashfsBlockDevice, SquashfsCharacterDevice, SquashfsSymlink};
 
 #[derive(Clone)]
 pub(crate) struct Entry<'a> {

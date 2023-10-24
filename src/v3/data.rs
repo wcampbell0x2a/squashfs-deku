@@ -5,18 +5,21 @@ use std::io::{Read, Seek, Write};
 use deku::prelude::*;
 use tracing::instrument;
 
-use crate::compressor::CompressionAction;
+use crate::bufread::WriteSeek;
+use crate::compressor::{CompressionAction, FilesystemCompressor};
 use crate::error::BackhandError;
-use crate::filesystem::reader::SquashfsRawData;
-use crate::filesystem::writer::FilesystemCompressor;
-use crate::fragment::Fragment;
-use crate::reader::WriteSeek;
+use crate::v3::filesystem::reader::SquashfsRawData;
+use crate::v3::fragment::Fragment;
 
 // bitflag for data size field in inode for signifying that the data is uncompressed
 const DATA_STORED_UNCOMPRESSED: u32 = 1 << 24;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, DekuRead, DekuWrite)]
-#[deku(endian = "endian", ctx = "endian: deku::ctx::Endian")]
+#[deku(
+    ctx = "endian: deku::ctx::Endian, order: deku::ctx::Order",
+    endian = "endian",
+    bit_order = "order"
+)]
 pub struct DataSize(u32);
 impl DataSize {
     pub fn new(size: u32, uncompressed: bool) -> Self {

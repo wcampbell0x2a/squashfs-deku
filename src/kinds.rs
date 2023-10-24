@@ -3,7 +3,16 @@
 use core::fmt;
 use std::sync::Arc;
 
-use crate::compressor::{CompressionAction, DefaultCompressor};
+use crate::{
+    compressor::{CompressionAction, Compressor},
+    BackhandError,
+};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Version {
+    V3_0,
+    V4_0,
+}
 
 /// Kind Magic - First 4 bytes of image
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -38,12 +47,16 @@ pub struct InnerKind<C: CompressionAction + ?Sized + 'static + Send + Sync> {
     pub(crate) type_endian: deku::ctx::Endian,
     /// Endian used for Metadata Lengths
     pub(crate) data_endian: deku::ctx::Endian,
+    pub(crate) version: Version,
     /// Major version
     pub(crate) version_major: u16,
     /// Minor version
     pub(crate) version_minor: u16,
     /// Compression impl
     pub(crate) compressor: &'static C,
+    /// v3 needs the bit-order for reading with little endian
+    /// v4 does not need this field
+    pub(crate) bit_order: Option<deku::ctx::Order>,
 }
 
 /// Version of SquashFS, also supporting custom changes to SquashFS seen in 3rd-party firmware
@@ -60,6 +73,7 @@ impl fmt::Debug for Kind {
             .field("magic", &self.inner.magic)
             .field("type_endian", &self.inner.type_endian)
             .field("data_endian", &self.inner.data_endian)
+            .field("version", &self.inner.version)
             .field("version_major", &self.inner.version_major)
             .field("version_minor", &self.inner.version_minor)
             .finish()
@@ -102,17 +116,6 @@ impl Kind {
     ///         Ok(())
     ///     }
     ///
-    ///     // Just pass to default compressor
-    ///     fn compress(
-    ///         &self,
-    ///         bytes: &[u8],
-    ///         fc: FilesystemCompressor,
-    ///         block_size: u32,
-    ///     ) -> Result<Vec<u8>, BackhandError> {
-    ///         DefaultCompressor.compress(bytes, fc, block_size)
-    ///     }
-    /// }
-    ///
     /// let kind = Kind::new(&CustomCompressor);
     /// ```
     pub fn new<C: CompressionAction + Send + Sync>(compressor: &'static C) -> Self {
@@ -150,6 +153,8 @@ impl Kind {
             "avm_be_v4_0" => AVM_BE_V4_0,
             "be_v4_0" => BE_V4_0,
             "le_v4_0" => LE_V4_0,
+            "le_v3_0" => LE_V3_0,
+            "be_v3_0" => BE_V3_0,
             _ => return Err("not a valid kind".to_string()),
         };
 
@@ -251,9 +256,11 @@ pub const LE_V4_0: InnerKind<dyn CompressionAction + Send + Sync> = InnerKind {
     magic: *b"hsqs",
     type_endian: deku::ctx::Endian::Little,
     data_endian: deku::ctx::Endian::Little,
+    version: Version::V4_0,
     version_major: 4,
     version_minor: 0,
-    compressor: &DefaultCompressor,
+    compressor: &crate::compressor::DefaultCompressor,
+    bit_order: None,
 };
 
 /// Big-Endian Superblock v4.0
@@ -261,9 +268,11 @@ pub const BE_V4_0: InnerKind<dyn CompressionAction + Send + Sync> = InnerKind {
     magic: *b"sqsh",
     type_endian: deku::ctx::Endian::Big,
     data_endian: deku::ctx::Endian::Big,
+    version: Version::V4_0,
     version_major: 4,
     version_minor: 0,
-    compressor: &DefaultCompressor,
+    compressor: &crate::compressor::DefaultCompressor,
+    bit_order: None,
 };
 
 /// AVM Fritz!OS firmware support. Tested with: <https://github.com/dnicolodi/squashfs-avm-tools>
@@ -271,7 +280,33 @@ pub const AVM_BE_V4_0: InnerKind<dyn CompressionAction + Send + Sync> = InnerKin
     magic: *b"sqsh",
     type_endian: deku::ctx::Endian::Big,
     data_endian: deku::ctx::Endian::Little,
+    version: Version::V4_0,
     version_major: 4,
     version_minor: 0,
-    compressor: &DefaultCompressor,
+    compressor: &crate::compressor::DefaultCompressor,
+    bit_order: None,
+};
+
+/// Little-Endian v3.0
+pub const LE_V3_0: InnerKind<dyn CompressionAction + Send + Sync> = InnerKind {
+    magic: *b"hsqs",
+    type_endian: deku::ctx::Endian::Little,
+    data_endian: deku::ctx::Endian::Little,
+    version: Version::V3_0,
+    version_major: 3,
+    version_minor: 0,
+    compressor: &crate::compressor::DefaultCompressor, // Only Gzip
+    bit_order: Some(deku::ctx::Order::Lsb0),
+};
+
+/// Big-Endian v3.0
+pub const BE_V3_0: InnerKind<dyn CompressionAction + Send + Sync> = InnerKind {
+    magic: *b"sqsh",
+    type_endian: deku::ctx::Endian::Big,
+    data_endian: deku::ctx::Endian::Big,
+    version: Version::V3_0,
+    version_major: 3,
+    version_minor: 0,
+    compressor: &crate::compressor::DefaultCompressor, // Only Gzip
+    bit_order: Some(deku::ctx::Order::Msb0),
 };
